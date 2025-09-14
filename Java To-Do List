@@ -1,0 +1,438 @@
+import java.io.*;
+import java.nio.file.*;
+import java.time.*;
+import java.time.format.DateTimeFormatter;
+import java.util.*;
+
+public class Main {
+
+    enum Priority { LOW, MEDIUM, HIGH, CRITICAL }
+    enum Status { OPEN, IN_PROGRESS, DONE }
+
+    static final DateTimeFormatter DATE_FMT = DateTimeFormatter.ISO_LOCAL_DATE;
+    static final Path DEFAULT_FILE = Paths.get("tasks.csv");
+
+    // -------------------- Domain --------------------
+    static class Task {
+        private int id;
+        String title;
+        String description;
+        LocalDate dueDate;
+        Priority priority;
+        Status status;
+        List<String> tags;
+        LocalDateTime createdAt;
+        LocalDateTime completedAt;
+
+        Task(int id, String title, String description, LocalDate dueDate,
+             Priority priority, Status status, List<String> tags,
+             LocalDateTime createdAt, LocalDateTime completedAt) {
+            this.id = id;
+            this.title = title == null ? "" : title.trim();
+            this.description = description == null ? "" : description.trim();
+            this.dueDate = dueDate;
+            this.priority = priority == null ? Priority.MEDIUM : priority;
+            this.status = status == null ? Status.OPEN : status;
+            this.tags = tags == null ? new ArrayList<>() : new ArrayList<>(tags);
+            this.createdAt = createdAt == null ? LocalDateTime.now() : createdAt;
+            this.completedAt = completedAt;
+            normalize();
+        }
+
+        void normalize() {
+            List<String> norm = new ArrayList<>();
+            for (String t : tags) {
+                if (t != null) {
+                    String s = t.trim().toLowerCase();
+                    if (!s.isEmpty()) norm.add(s);
+                }
+            }
+            tags = norm;
+        }
+
+        int getId() { return id; }
+        void setId(int id) { this.id = id; }
+
+        void markDone() {
+            status = Status.DONE;
+            completedAt = LocalDateTime.now();
+        }
+
+        String tagsAsString() { return String.join(",", tags); }
+
+        String toCsv() {
+            return id + "|" +
+                    title + "|" +
+                    description + "|" +
+                    (dueDate == null ? "" : dueDate.format(DATE_FMT)) + "|" +
+                    priority.name() + "|" +
+                    status.name() + "|" +
+                    tagsAsString() + "|" +
+                    createdAt + "|" +
+                    (completedAt == null ? "" : completedAt);
+        }
+
+        static Task fromCsv(String line) {
+            String[] p = line.split("\\|", -1);
+            if (p.length < 9) return null;
+            return new Task(
+                    Integer.parseInt(p[0]),
+                    p[1],
+                    p[2],
+                    p[3].isEmpty() ? null : LocalDate.parse(p[3], DATE_FMT),
+                    Priority.valueOf(p[4]),
+                    Status.valueOf(p[5]),
+                    p[6].isEmpty() ? new ArrayList<>() : Arrays.asList(p[6].split(",")),
+                    LocalDateTime.parse(p[7]),
+                    p[8].isEmpty() ? null : LocalDateTime.parse(p[8])
+            );
+        }
+    }
+
+    // -------------------- Repository --------------------
+    static class TaskRepository {
+        private final List<Task> tasks = new ArrayList<>();
+        private int nextId = 1;
+
+        List<Task> all() { return new ArrayList<>(tasks); }
+
+        Task add(Task t) { t.setId(nextId++); tasks.add(t); return t; }
+
+        Optional<Task> findById(int id) {
+            return tasks.stream().filter(t -> t.getId() == id).findFirst();
+        }
+
+        boolean delete(int id) { return tasks.removeIf(t -> t.getId() == id); }
+
+        int size() { return tasks.size(); }
+
+        void clear() { tasks.clear(); nextId = 1; }
+
+        void save(Path path) throws IOException {
+            List<String> lines = new ArrayList<>();
+            for (Task t : tasks) lines.add(t.toCsv());
+            Files.write(path, lines, java.nio.charset.StandardCharsets.UTF_8,
+                    StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+        }
+
+        void load(Path path) throws IOException {
+            clear();
+            if (!Files.exists(path)) return;
+            List<String> lines = Files.readAllLines(path, java.nio.charset.StandardCharsets.UTF_8);
+            for (String line : lines) {
+                if (line.trim().isEmpty()) continue;
+                Task t = Task.fromCsv(line);
+                if (t != null) { tasks.add(t); nextId = Math.max(nextId, t.getId() + 1); }
+            }
+        }
+    }
+
+    // -------------------- UI --------------------
+    static class UI {
+        private final Scanner in;
+        UI(Scanner in) { this.in = in; }
+
+        String prompt(String label) { System.out.print(label); return in.nextLine(); }
+
+        String promptNonEmpty(String label) {
+            while (true) {
+                String s = prompt(label);
+                if (!s.trim().isEmpty()) return s.trim();
+                System.out.println("Value cannot be empty.");
+            }
+        }
+
+        LocalDate promptDate(String label, boolean allowEmpty) {
+            while (true) {
+                String s = prompt(label);
+                if (allowEmpty && s.trim().isEmpty()) return null;
+                try { return LocalDate.parse(s.trim(), DATE_FMT); }
+                catch (Exception e) { System.out.println("Use date format YYYY-MM-DD."); }
+            }
+        }
+
+        <E extends Enum<E>> E promptEnum(String label, E def) {
+            String opts = Arrays.toString(def.getDeclaringClass().getEnumConstants());
+            while (true) {
+                String s = prompt(label + opts + " [" + def.name() + "]: ");
+                if (s.trim().isEmpty()) return def;
+                try { return Enum.valueOf(def.getDeclaringClass(), s.trim().toUpperCase()); }
+                catch (Exception e) { System.out.println("Invalid choice."); }
+            }
+        }
+
+        List<String> promptTags() {
+            String s = prompt("Tags (comma separated, optional): ");
+            if (s.trim().isEmpty()) return new ArrayList<>();
+            List<String> out = new ArrayList<>();
+            for (String t : s.split(",")) {
+                String v = t.trim().toLowerCase();
+                if (!v.isEmpty()) out.add(v);
+            }
+            return out;
+        }
+
+        int promptInt(String label) {
+            while (true) {
+                String s = prompt(label);
+                try { return Integer.parseInt(s.trim()); } catch (Exception e) {
+                    System.out.println("Enter a valid number.");
+                }
+            }
+        }
+    }
+
+    // -------------------- Printer --------------------
+    static class Printer {
+        static void printList(List<Task> tasks) {
+            if (tasks.isEmpty()) {
+                System.out.println("\nNo tasks.");
+                return;
+            }
+            System.out.println();
+            System.out.println("ID  | Title                           | Due        | Pri | Status       | Tags");
+            System.out.println("----+---------------------------------+------------+-----+--------------+--------------------------");
+            for (Task t : tasks) printTask(t);
+        }
+
+        static void printTask(Task t) {
+            String title = t.title.length() > 33 ? t.title.substring(0,32) + "…" : t.title;
+            String due = t.dueDate == null ? " " : t.dueDate.format(DATE_FMT);
+            String pri = t.priority.name().substring(0, Math.min(3, t.priority.name().length()));
+            String status = String.format("%-12s", t.status.name());
+            String tags = String.join(",", t.tags);
+            if (tags.length() > 26) tags = tags.substring(0,25) + "…";
+            System.out.printf("%-4d| %-33s | %-10s | %-3s | %-12s | %-26s%n",
+                    t.getId(), title, due, pri, status, tags);
+        }
+    }
+
+    // -------------------- Main --------------------
+    public static void main(String[] args) {
+        Scanner sc = new Scanner(System.in);
+        UI ui = new UI(sc);
+        TaskRepository repo = new TaskRepository();
+        autoLoad(repo);
+
+        System.out.println("=== To-Do List (Java) ===");
+        help();
+
+        while (true) {
+            System.out.print("\n> ");
+            if (!sc.hasNextLine()) break;
+            String cmdLine = sc.nextLine().trim();
+            if (cmdLine.isEmpty()) continue;
+            String cmd = cmdLine.split("\\s+")[0].toLowerCase();
+
+            try {
+                switch (cmd) {
+                    case "1":
+                    case "add": addFlow(ui, repo); break;
+                    case "2":
+                    case "list": listFlow(repo); break;
+                    case "3":
+                    case "edit": editFlow(ui, repo); break;
+                    case "4":
+                    case "done": completeFlow(ui, repo); break;
+                    case "5":
+                    case "delete": deleteFlow(ui, repo); break;
+                    case "6":
+                    case "search": searchFlow(ui, repo); break;
+                    case "7":
+                    case "sort": sortFlow(ui, repo); break;
+                    case "8":
+                    case "save": saveFlow(repo); break;
+                    case "9":
+                    case "load": loadFlow(repo); break;
+                    case "0":
+                    case "quit": exitFlow(repo); return;
+                    case "help": help(); break;
+                    default: System.out.println("Unknown command. Type 'help' for options.");
+                }
+            } catch (Exception ex) {
+                System.out.println("Error: " + ex.getMessage());
+            }
+        }
+    }
+
+    static void help() {
+        System.out.println("\nMenu");
+        System.out.println(" 1) add        - Add a new task");
+        System.out.println(" 2) list       - List tasks");
+        System.out.println(" 3) edit       - Edit a task");
+        System.out.println(" 4) done       - Mark a task as completed");
+        System.out.println(" 5) delete     - Delete a task");
+        System.out.println(" 6) search     - Search by text or #tag");
+        System.out.println(" 7) sort       - Sort by due, priority, created");
+        System.out.println(" 8) save       - Save tasks to file");
+        System.out.println(" 9) load       - Load tasks from file");
+        System.out.println(" 0) quit       - Exit");
+    }
+
+    static void autoLoad(TaskRepository repo) {
+        try {
+            if (Files.exists(DEFAULT_FILE)) {
+                repo.load(DEFAULT_FILE);
+                System.out.println("Loaded " + repo.size() + " task(s) from " + DEFAULT_FILE);
+            }
+        } catch (Exception ignored) {}
+    }
+
+    // -------- Flows --------
+    static void addFlow(UI ui, TaskRepository repo) {
+        String title = ui.promptNonEmpty("Title: ");
+        String desc = ui.prompt("Description: ");
+        LocalDate due = ui.promptDate("Due date YYYY-MM-DD (optional): ", true);
+        Priority pri = ui.promptEnum("Priority ", Priority.MEDIUM);
+        Status st = ui.promptEnum("Status ", Status.OPEN);
+        List<String> tags = ui.promptTags();
+
+        Task t = new Task(-1, title, desc, due, pri, st, tags, LocalDateTime.now(), null);
+        repo.add(t);
+        System.out.println("Created task #" + t.getId());
+    }
+
+    static void listFlow(TaskRepository repo) {
+        List<Task> all = repo.all();
+        // default sorting: by status, due, priority, created
+        all.sort(Comparator
+                .comparing((Task t) -> t.status.ordinal())
+                .thenComparing(t -> t.dueDate == null ? LocalDate.MAX : t.dueDate)
+                .thenComparing((Task t) -> -t.priority.ordinal())
+                .thenComparing(t -> t.createdAt));
+        Printer.printList(all);
+    }
+
+    static void editFlow(UI ui, TaskRepository repo) {
+        int id = ui.promptInt("Edit task id: ");
+        Task t = repo.findById(id).orElse(null);
+        if (t == null) { System.out.println("Not found."); return; }
+
+        System.out.println("Leave fields blank to keep current.");
+        String title = ui.prompt("Title [" + t.title + "]: ");
+        if (!title.trim().isEmpty()) t.title = title.trim();
+
+        String desc = ui.prompt("Description [" + shorten(t.description) + "]: ");
+        if (!desc.trim().isEmpty()) t.description = desc;
+
+        String dueStr = ui.prompt("Due YYYY-MM-DD [" + (t.dueDate == null ? "" : t.dueDate) + "]: ");
+        if (!dueStr.trim().isEmpty()) {
+            try { t.dueDate = LocalDate.parse(dueStr.trim(), DATE_FMT); }
+            catch (Exception e) { System.out.println("Invalid date, unchanged."); }
+        }
+
+        String priStr = ui.prompt("Priority " + Arrays.toString(Priority.values()) + " [" + t.priority + "]: ");
+        if (!priStr.trim().isEmpty()) {
+            try { t.priority = Priority.valueOf(priStr.trim().toUpperCase()); }
+            catch (Exception e) { System.out.println("Invalid priority, unchanged."); }
+        }
+
+        String stStr = ui.prompt("Status " + Arrays.toString(Status.values()) + " [" + t.status + "]: ");
+        if (!stStr.trim().isEmpty()) {
+            try { t.status = Status.valueOf(stStr.trim().toUpperCase()); }
+            catch (Exception e) { System.out.println("Invalid status, unchanged."); }
+        }
+
+        String tagsStr = ui.prompt("Tags comma separated [" + String.join(",", t.tags) + "]: ");
+        if (!tagsStr.trim().isEmpty()) {
+            List<String> newTags = new ArrayList<>();
+            for (String s : tagsStr.split(",")) {
+                String v = s.trim().toLowerCase();
+                if (!v.isEmpty()) newTags.add(v);
+            }
+            t.tags = newTags;
+        }
+
+        t.normalize();
+        System.out.println("Updated task #" + t.getId());
+    }
+
+    static String shorten(String s) {
+        if (s == null) return "";
+        return s.length() > 40 ? s.substring(0, 37) + "..." : s;
+    }
+
+    static void completeFlow(UI ui, TaskRepository repo) {
+        int id = ui.promptInt("Complete task id: ");
+        Task t = repo.findById(id).orElse(null);
+        if (t == null) { System.out.println("Not found."); return; }
+        t.markDone();
+        System.out.println("Task #" + id + " marked DONE.");
+    }
+
+    static void deleteFlow(UI ui, TaskRepository repo) {
+        int id = ui.promptInt("Delete task id: ");
+        boolean ok = repo.delete(id);
+        System.out.println(ok ? "Deleted." : "Not found.");
+    }
+
+    static void searchFlow(UI ui, TaskRepository repo) {
+        String q = ui.prompt("Search text or #tag: ").trim().toLowerCase();
+        if (q.isEmpty()) { System.out.println("Nothing to search."); return; }
+
+        boolean byTag = q.startsWith("#");
+        String needle = byTag ? q.substring(1) : q;
+
+        List<Task> hits = new ArrayList<>();
+        for (Task t : repo.all()) {
+            if (byTag) {
+                if (t.tags.contains(needle)) hits.add(t);
+            } else {
+                if (t.title.toLowerCase().contains(needle) ||
+                    t.description.toLowerCase().contains(needle)) hits.add(t);
+            }
+        }
+        Printer.printList(hits);
+    }
+
+    static void sortFlow(UI ui, TaskRepository repo) {
+        System.out.println("Sort by 1) due  2) priority  3) created");
+        String choice = ui.prompt("Choice: ").trim().toLowerCase();
+        List<Task> list = repo.all();
+
+        switch (choice) {
+            case "1":
+            case "due":
+                list.sort(Comparator
+                        .comparing((Task t) -> t.dueDate == null ? LocalDate.MAX : t.dueDate)
+                        .thenComparing((Task t) -> -t.priority.ordinal())
+                        .thenComparing(t -> t.createdAt));
+                break;
+            case "2":
+            case "priority":
+                list.sort(Comparator
+                        .comparing((Task t) -> -t.priority.ordinal())
+                        .thenComparing(t -> t.dueDate == null ? LocalDate.MAX : t.dueDate)
+                        .thenComparing(t -> t.createdAt));
+                break;
+            case "3":
+            case "created":
+            default:
+                list.sort(Comparator.comparing(t -> t.createdAt));
+        }
+        Printer.printList(list);
+    }
+
+    static void saveFlow(TaskRepository repo) {
+        try {
+            repo.save(DEFAULT_FILE);
+            System.out.println("Saved " + repo.size() + " task(s) to " + DEFAULT_FILE);
+        } catch (IOException e) {
+            System.out.println("Could not save: " + e.getMessage());
+        }
+    }
+
+    static void loadFlow(TaskRepository repo) {
+        try {
+            repo.load(DEFAULT_FILE);
+            System.out.println("Loaded " + repo.size() + " task(s) from " + DEFAULT_FILE);
+        } catch (IOException e) {
+            System.out.println("Could not load: " + e.getMessage());
+        }
+    }
+
+    static void exitFlow(TaskRepository repo) {
+        saveFlow(repo);
+        System.out.println("Goodbye.");
+    }
+}
