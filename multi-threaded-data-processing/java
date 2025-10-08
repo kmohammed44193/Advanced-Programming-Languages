@@ -1,0 +1,121 @@
+import java.io.IOException;
+import java.io.PrintWriter;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.LocalTime;
+import java.util.Random;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.logging.Level;
+import java.util.logging.Logger;
+
+public class Main {
+
+    // Simple Task record
+    static class Task {
+        final int id;
+        final String payload;
+        Task(int id, String payload) {
+            this.id = id;
+            this.payload = payload;
+        }
+    }
+
+    private static final Logger LOG = Logger.getLogger(Main.class.getName());
+
+    public static void main(String[] args) {
+        // Tunables
+        final int numWorkers = 4;
+        final int numTasks = 20;
+        final Path resultsFile = Path.of("java_results.txt");
+
+        // Shared structures
+        BlockingQueue<Task> queue = new LinkedBlockingQueue<>();
+        ConcurrentLinkedQueue<String> results = new ConcurrentLinkedQueue<>();
+        ExecutorService pool = Executors.newFixedThreadPool(numWorkers);
+        AtomicInteger activeWorkers = new AtomicInteger(numWorkers);
+
+        // Populate tasks
+        for (int i = 1; i <= numTasks; i++) {
+            queue.add(new Task(i, "data-" + i));
+        }
+
+        // Worker definition
+        class Worker implements Runnable {
+            private final int workerId;
+            private final Random rng = new Random();
+
+            Worker(int workerId) { this.workerId = workerId; }
+
+            @Override
+            public void run() {
+                LOG.info(() -> stamp("Worker " + workerId + " started"));
+                try {
+                    while (true) {
+                        Task t = queue.poll(500, TimeUnit.MILLISECONDS);
+                        if (t == null) {
+                            // No more tasks found after waiting, assume done
+                            break;
+                        }
+                        try {
+                            // Simulate processing
+                            Thread.sleep(100 + rng.nextInt(300));
+                            String out = "worker=" + workerId +
+                                    ", task=" + t.id +
+                                    ", payload=" + t.payload +
+                                    ", processed_at=" + LocalTime.now();
+                            results.add(out);
+                            LOG.info(() -> stamp("Worker " + workerId + " completed task " + t.id));
+                        } catch (InterruptedException ie) {
+                            Thread.currentThread().interrupt();
+                            LOG.log(Level.WARNING, stamp("Worker " + workerId + " interrupted"), ie);
+                            break;
+                        } catch (Exception ex) {
+                            LOG.log(Level.SEVERE, stamp("Worker " + workerId + " error on task " + t.id), ex);
+                        }
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    LOG.log(Level.WARNING, stamp("Worker " + workerId + " interrupted while polling"), e);
+                } finally {
+                    int left = activeWorkers.decrementAndGet();
+                    LOG.info(() -> stamp("Worker " + workerId + " exiting. Active workers left " + left));
+                }
+            }
+        }
+
+        // Start workers
+        for (int w = 1; w <= numWorkers; w++) {
+            pool.submit(new Worker(w));
+        }
+
+        // Shutdown and await completion
+        pool.shutdown();
+        try {
+            boolean finished = pool.awaitTermination(60, TimeUnit.SECONDS);
+            if (!finished) {
+                LOG.warning(stamp("Timed out waiting for workers. Forcing shutdown."));
+                pool.shutdownNow();
+            }
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            LOG.log(Level.SEVERE, stamp("Main thread interrupted while awaiting termination"), ie);
+        }
+
+        // Persist results
+        try (PrintWriter pw = new PrintWriter(Files.newBufferedWriter(resultsFile))) {
+            for (String line : results) {
+                pw.println(line);
+            }
+            LOG.info(stamp("Wrote " + results.size() + " lines to " + resultsFile.toAbsolutePath()));
+        } catch (IOException ioe) {
+            LOG.log(Level.SEVERE, stamp("Failed writing results file"), ioe);
+        }
+
+        LOG.info(stamp("Done"));
+    }
+
+    private static String stamp(String msg) {
+        return "[" + LocalTime.now() + "] " + msg;
+    }
+}
