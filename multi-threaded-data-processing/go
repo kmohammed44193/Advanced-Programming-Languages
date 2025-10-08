@@ -1,0 +1,106 @@
+package main
+
+import (
+	"bufio"
+	"context"
+	"fmt"
+	"log"
+	"math/rand"
+	"os"
+	"sync"
+	"time"
+)
+
+type Task struct {
+	ID      int
+	Payload string
+}
+
+func worker(ctx context.Context, id int, tasks <-chan Task, results chan<- string, wg *sync.WaitGroup) {
+	defer wg.Done()
+	log.Printf("[%s] worker %d started", time.Now().Format(time.Kitchen), id)
+
+	for {
+		select {
+		case <-ctx.Done():
+			log.Printf("[%s] worker %d context canceled", time.Now().Format(time.Kitchen), id)
+			return
+		case t, ok := <-tasks:
+			if !ok {
+				log.Printf("[%s] worker %d exiting no more tasks", time.Now().Format(time.Kitchen), id)
+				return
+			}
+			// Simulate processing
+			time.Sleep(time.Duration(100+rand.Intn(300)) * time.Millisecond)
+			out := fmt.Sprintf("worker=%d, task=%d, payload=%s, processed_at=%s",
+				id, t.ID, t.Payload, time.Now().Format(time.Kitchen))
+			results <- out
+			log.Printf("[%s] worker %d completed task %d", time.Now().Format(time.Kitchen), id, t.ID)
+		}
+	}
+}
+
+func main() {
+	numWorkers := 4
+	numTasks := 20
+	resultsPath := "go_results.txt"
+
+	log.SetFlags(0)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	tasks := make(chan Task, 8)   // buffered tasks channel
+	results := make(chan string)  // results channel
+	var wg sync.WaitGroup
+
+	// Start writer goroutine for file output
+	file, err := os.Create(resultsPath)
+	if err != nil {
+		log.Fatalf("failed to create results file %s error %v", resultsPath, err)
+	}
+	defer func() {
+		if cerr := file.Close(); cerr != nil {
+			log.Printf("error closing file %v", cerr)
+		}
+	}()
+
+	writer := bufio.NewWriter(file)
+	var writeErr error
+	doneWriting := make(chan struct{})
+
+	go func() {
+		defer close(doneWriting)
+		for line := range results {
+			if _, err := writer.WriteString(line + "\n"); err != nil {
+				writeErr = err
+				log.Printf("writer error %v", err)
+				return
+			}
+		}
+		_ = writer.Flush()
+	}()
+
+	// Start workers
+	wg.Add(numWorkers)
+	for i := 1; i <= numWorkers; i++ {
+		go worker(ctx, i, tasks, results, &wg)
+	}
+
+	// Enqueue tasks
+	for i := 1; i <= numTasks; i++ {
+		tasks <- Task{ID: i, Payload: fmt.Sprintf("data-%d", i)}
+	}
+	close(tasks)
+
+	// Wait for workers then close results
+	wg.Wait()
+	close(results)
+	<-doneWriting
+
+	if writeErr != nil {
+		log.Fatalf("write failed %v", writeErr)
+	}
+
+	log.Printf("[%s] wrote results to %s", time.Now().Format(time.Kitchen), resultsPath)
+	log.Printf("[%s] done", time.Now().Format(time.Kitchen))
+}
